@@ -49,3 +49,12 @@ jobs:
 
       - name: Run web build
         run: pnpm build
+
+      - name: Run TUI typecheck
+        run: pnpm tui:typecheck
+
+      - name: Run TUI build
+        run: pnpm tui:build
+
+      - name: Build TUI backend daemon
+        run: pnpm backend:build

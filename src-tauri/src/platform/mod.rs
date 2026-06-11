@@ -10,27 +10,27 @@ use self::unix as imp;
 #[cfg(windows)]
 use self::windows as imp;
 
-pub(crate) struct ShellCommand {
-    pub(crate) program: String,
-    pub(crate) args: Vec<String>,
+pub struct ShellCommand {
+    pub program: String,
+    pub args: Vec<String>,
 }
 
-pub(crate) fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> {
     imp::home_dir()
 }
 
-pub(crate) fn login_shell_env() -> &'static [(String, String)] {
+pub fn login_shell_env() -> &'static [(String, String)] {
     imp::login_shell_env()
 }
 
-pub(crate) fn login_shell_path() -> &'static str {
+pub fn login_shell_path() -> &'static str {
     imp::login_shell_path()
 }
 
-pub(crate) fn default_shell_command() -> ShellCommand {
+pub fn default_shell_command() -> ShellCommand {
     imp::default_shell_command()
 }
 
-pub(crate) fn detect_path(binary: &str) -> String {
+pub fn detect_path(binary: &str) -> String {
     imp::detect_path(binary)
 }

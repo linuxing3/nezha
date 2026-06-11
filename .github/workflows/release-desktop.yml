@@ -115,6 +115,36 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
+      - name: Build TUI client
+        run: pnpm tui:build
+
+      - name: Build TUI backend daemon
+        run: cargo build --manifest-path src-tauri/Cargo.toml --bin nezha-backend --release --target ${{ matrix.target }}
+
+      - name: Package TUI artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg="nezha-tui-${{ matrix.target }}"
+          mkdir -p "$pkg/dist-tui"
+          cp -R dist-tui/* "$pkg/dist-tui/"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "src-tauri/target/${{ matrix.target }}/release/nezha-backend.exe" "$pkg/nezha-backend.exe"
+            printf '@echo off\r\nset SCRIPT_DIR=%%~dp0\r\nset NEZHA_BACKEND=%%SCRIPT_DIR%%nezha-backend.exe\r\nnode "%%SCRIPT_DIR%%dist-tui\\src-tui\\main.js" %%*\r\n' > "$pkg/nezha-tui.cmd"
+            7z a "$pkg.zip" "$pkg"
+          else
+            cp "src-tauri/target/${{ matrix.target }}/release/nezha-backend" "$pkg/nezha-backend"
+            cat > "$pkg/nezha-tui" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export NEZHA_BACKEND="$DIR/nezha-backend"
+          exec node "$DIR/dist-tui/src-tui/main.js" "$@"
+          EOF
+            chmod +x "$pkg/nezha-tui" "$pkg/nezha-backend"
+            tar -czf "$pkg.tar.gz" "$pkg"
+          fi
+
       - name: Build ${{ matrix.name }}
         run: pnpm tauri build --target ${{ matrix.target }} ${{ matrix.bundle_args }}
 
@@ -135,6 +165,8 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
             src-tauri/target/${{ matrix.target }}/release/bundle/rpm/*.rpm
             ${{ matrix.standalone_binary }}
+            nezha-tui-${{ matrix.target }}.tar.gz
+            nezha-tui-${{ matrix.target }}.zip
 
   release:
     name: Create GitHub Release

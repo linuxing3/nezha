@@ -1,56 +1,22 @@
-use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
-use std::io::Write;
-use std::sync::Arc;
-
-use usage::CodexRpcClient;
-
 mod agent_assist;
 mod analytics;
-mod app_settings;
-mod config;
+pub mod app_settings;
+mod backend;
+pub mod config;
 mod event_watcher;
-mod fs;
-mod git;
-mod hooks;
+pub mod fs;
+pub mod git;
+pub mod hooks;
 mod notification;
-mod platform;
-mod pty;
-mod session;
+pub mod platform;
+pub mod pty;
+pub mod session;
 mod skills;
-mod storage;
+pub mod storage;
 mod subprocess;
 mod usage;
 
-use session::{ClaudeSessionInfo, CodexSessionInfo};
-
-pub struct TaskManager {
-    pub(crate) pty_masters: Mutex<HashMap<String, Box<dyn portable_pty::MasterPty + Send>>>,
-    pub(crate) pty_writers: Mutex<HashMap<String, Box<dyn Write + Send>>>,
-    pub(crate) child_handles:
-        Mutex<HashMap<String, Arc<std::sync::Mutex<Box<dyn portable_pty::Child + Send + Sync>>>>>,
-    pub(crate) cancelled_tasks: Mutex<HashSet<String>>,
-    pub(crate) manually_completed_tasks: Mutex<HashSet<String>>,
-    pub(crate) codex_sessions: Mutex<HashMap<String, CodexSessionInfo>>,
-    pub(crate) claude_sessions: Mutex<HashMap<String, ClaudeSessionInfo>>,
-    pub(crate) claimed_session_paths: Mutex<HashSet<String>>,
-    /// Persistent `codex app-server` process reused across `read_usage_snapshot` calls.
-    pub(crate) codex_rpc: Arc<Mutex<Option<CodexRpcClient>>>,
-}
-
-impl TaskManager {
-    /// Atomically remove a task/shell from all PTY maps (masters, writers, children).
-    /// Locks are acquired in a fixed order to prevent deadlocks.
-    pub(crate) fn remove_pty_handles(&self, id: &str) {
-        let mut masters = self.pty_masters.lock();
-        let mut writers = self.pty_writers.lock();
-        let mut children = self.child_handles.lock();
-        masters.remove(id);
-        writers.remove(id);
-        children.remove(id);
-    }
-}
-
+pub use backend::TaskManager;
 /// macOS: 把主窗口收起到 Dock(hide 而非退出)。
 ///
 /// 原生全屏窗口独占一个 Space,直接 hide 会留下空 Space(黑屏),必须先退出全屏。
@@ -115,17 +81,7 @@ pub fn run() {
             crate::event_watcher::start(app.handle().clone());
             Ok(())
         })
-        .manage(TaskManager {
-            pty_masters: Mutex::new(HashMap::new()),
-            pty_writers: Mutex::new(HashMap::new()),
-            child_handles: Mutex::new(HashMap::new()),
-            cancelled_tasks: Mutex::new(HashSet::new()),
-            manually_completed_tasks: Mutex::new(HashSet::new()),
-            codex_sessions: Mutex::new(HashMap::new()),
-            claude_sessions: Mutex::new(HashMap::new()),
-            claimed_session_paths: Mutex::new(HashSet::new()),
-            codex_rpc: Arc::new(Mutex::new(None)),
-        })
+        .manage(TaskManager::new())
         .on_window_event(|window, event| {
             // macOS: 点关闭按钮(红灯)时隐藏窗口而非退出,与 Cmd+W 行为一致;
             // 点 Dock 图标可唤回(见下方 Reopen 处理)。
