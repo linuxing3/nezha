@@ -52,7 +52,7 @@ struct HookEvent {
     extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct HookEventEnvelope {
     id: String,

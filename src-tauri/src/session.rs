@@ -970,7 +970,7 @@ fn parse_claude_session(lines: &[SessionLine]) -> Vec<SessionMessage> {
                 let parts = message
                     .get("content")
                     .and_then(|c| c.as_array())
-                    .map(claude_assistant_blocks)
+                    .map(|blocks| claude_assistant_blocks(blocks))
                     .unwrap_or_default();
                 if !parts.is_empty() {
                     messages.push(make_session_message("claude", "assistant", line, &val, parts));
