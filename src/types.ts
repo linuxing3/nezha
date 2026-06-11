@@ -121,6 +121,108 @@ export function isActiveTaskStatus(status: TaskStatus): boolean {
   );
 }
 
+export interface GitWorktreeInfo {
+  path: string;
+  branch?: string | null;
+  head?: string | null;
+  detached: boolean;
+  bare: boolean;
+  prunable: boolean;
+  locked: boolean;
+  dirty: boolean;
+}
+
+export interface SessionTextContent {
+  type: "text";
+  text: string;
+}
+
+export interface SessionToolUseContent {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: string;
+}
+
+export interface SessionToolResultContent {
+  type: "tool_result";
+  toolUseId: string;
+  content: string;
+  isError: boolean;
+}
+
+export interface SessionThinkingContent {
+  type: "thinking";
+  thinking: string;
+}
+
+export interface SessionErrorContent {
+  type: "error";
+  message: string;
+}
+
+export interface SessionRawEventContent {
+  type: "raw_event";
+  label: string;
+  raw: unknown;
+}
+
+export type SessionContent =
+  | SessionTextContent
+  | SessionToolUseContent
+  | SessionToolResultContent
+  | SessionThinkingContent
+  | SessionErrorContent
+  | SessionRawEventContent;
+
+export interface SessionMessage {
+  id: string;
+  role: "user" | "assistant" | "system" | string;
+  source: "claude" | "codex" | string;
+  timestamp?: string | null;
+  line: number;
+  offset: number;
+  content: SessionContent[];
+}
+
+export interface SessionMessagesPage {
+  messages: SessionMessage[];
+  nextCursor: number;
+  hasMore: boolean;
+}
+
+export interface SessionRawEvent {
+  id: string;
+  source: string;
+  line: number;
+  offset: number;
+  kind: string;
+  role?: string | null;
+  timestamp?: string | null;
+  raw: unknown;
+  parseError?: string | null;
+}
+
+export interface SessionRawEventPage {
+  events: SessionRawEvent[];
+  nextCursor: number;
+  hasMore: boolean;
+}
+
+export interface TaskEventPayload {
+  id: string;
+  taskId: string;
+  agent: AgentType | string;
+  event: string;
+  normalizedStatus?: TaskStatus | string | null;
+  sessionId?: string | null;
+  transcriptPath?: string | null;
+  raw: unknown;
+  parseError?: string | null;
+  sourcePath: string;
+  offset: number;
+}
+
 // ── Notifications ────────────────────────────────────────────────────────────
 
 export interface NotificationItem {

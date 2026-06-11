@@ -1272,6 +1272,116 @@ pub async fn git_remote_counts(
     })
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitWorktreeInfo {
+    path: String,
+    branch: Option<String>,
+    head: Option<String>,
+    detached: bool,
+    bare: bool,
+    prunable: bool,
+    locked: bool,
+    dirty: bool,
+}
+
+fn parse_worktree_porcelain(stdout: &[u8]) -> Vec<GitWorktreeInfo> {
+    let mut result = Vec::new();
+    let mut current: Option<GitWorktreeInfo> = None;
+
+    for line in String::from_utf8_lossy(stdout).lines() {
+        if line.trim().is_empty() {
+            if let Some(info) = current.take() {
+                result.push(info);
+            }
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(info) = current.take() {
+                result.push(info);
+            }
+            current = Some(GitWorktreeInfo {
+                path: path.to_string(),
+                branch: None,
+                head: None,
+                detached: false,
+                bare: false,
+                prunable: false,
+                locked: false,
+                dirty: false,
+            });
+            continue;
+        }
+        let Some(info) = current.as_mut() else {
+            continue;
+        };
+        if let Some(head) = line.strip_prefix("HEAD ") {
+            info.head = Some(head.to_string());
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            info.branch = Some(branch.trim_start_matches("refs/heads/").to_string());
+        } else if line == "detached" {
+            info.detached = true;
+        } else if line == "bare" {
+            info.bare = true;
+        } else if line.starts_with("prunable") {
+            info.prunable = true;
+        } else if line.starts_with("locked") {
+            info.locked = true;
+        }
+    }
+    if let Some(info) = current {
+        result.push(info);
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn git_list_worktrees(project_path: String) -> Result<Vec<GitWorktreeInfo>, String> {
+    let output = run_git_with_timeout(
+        project_path.clone(),
+        vec!["worktree".to_string(), "list".to_string(), "--porcelain".to_string()],
+        Duration::from_secs(5),
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(git_command_error(&output, "Failed to list worktrees"));
+    }
+    let mut worktrees = parse_worktree_porcelain(&output.stdout);
+    for worktree in &mut worktrees {
+        let status = run_git_with_timeout(
+            worktree.path.clone(),
+            vec!["status".to_string(), "--porcelain".to_string()],
+            Duration::from_secs(5),
+        )
+        .await;
+        worktree.dirty = status
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| !output.stdout.is_empty())
+            .unwrap_or(false);
+    }
+    Ok(worktrees)
+}
+
+#[tauri::command]
+pub async fn git_prune_worktrees(project_path: String) -> Result<String, String> {
+    let output = run_git_with_timeout(
+        project_path,
+        vec!["worktree".to_string(), "prune".to_string(), "--verbose".to_string()],
+        Duration::from_secs(10),
+    )
+    .await?;
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output.status.success() {
+        return Err(combined);
+    }
+    Ok(combined.trim().to_string())
+}
+
 // ── Task worktree management ─────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]

@@ -20,6 +20,7 @@ import { FileViewer } from "./FileViewer";
 import { GitChanges } from "./GitChanges";
 import { GitHistory } from "./GitHistory";
 import { GitDiffViewer } from "./GitDiffViewer";
+import { WorktreePanel } from "./WorktreePanel";
 import { ProjectRail } from "./ProjectRail";
 import { SettingsDialog } from "./SettingsDialog";
 import { RightToolbar } from "./RightToolbar";
@@ -204,6 +205,31 @@ export function ProjectPage({
       openRightPanel("files");
     },
     [handleFileSelect, openRightPanel],
+  );
+
+  const selectTaskForWorktree = useCallback(
+    (taskId: string | null) => {
+      if (taskId) {
+        onSelectTask(taskId);
+      }
+    },
+    [onSelectTask],
+  );
+
+  const handleWorktreeOpenGitChanges = useCallback(
+    (taskId: string | null) => {
+      selectTaskForWorktree(taskId);
+      openRightPanel("git-changes");
+    },
+    [openRightPanel, selectTaskForWorktree],
+  );
+
+  const handleWorktreeOpenFiles = useCallback(
+    (taskId: string | null) => {
+      selectTaskForWorktree(taskId);
+      openRightPanel("files");
+    },
+    [openRightPanel, selectTaskForWorktree],
   );
 
   // 只挂载当前选中的任务的 xterm 实例，其他任务通过 snapshot 序列化后卸载。
@@ -419,7 +445,7 @@ export function ProjectPage({
               <FileViewer
                 tabs={openFiles}
                 activeFilePath={activeFilePath}
-                projectPath={project.path}
+                projectPath={gitContextPath}
                 onSelectTab={handleFileTabSelect}
                 onCloseTab={handleFileTabClose}
                 onCloseOtherTabs={handleCloseOtherFileTabs}
@@ -519,10 +545,23 @@ export function ProjectPage({
           {rightPanel === "files" && (
             <ErrorBoundary label="文件浏览器">
               <FileExplorer
-                projectPath={project.path}
-                projectName={project.name}
+                projectPath={gitContextPath}
+                projectName={selectedTask?.worktreeBranch ?? project.name}
                 onFileSelect={handleFileSelect}
                 active={visible}
+                width={rightPanelWidth}
+              />
+            </ErrorBoundary>
+          )}
+          {rightPanel === "worktrees" && (
+            <ErrorBoundary label="工作树">
+              <WorktreePanel
+                projectPath={project.path}
+                tasks={projectTasks}
+                onOpenGitChanges={handleWorktreeOpenGitChanges}
+                onOpenFiles={handleWorktreeOpenFiles}
+                onMergeWorktree={onMergeWorktree}
+                onDiscardWorktree={onDiscardWorktree}
                 width={rightPanelWidth}
               />
             </ErrorBoundary>

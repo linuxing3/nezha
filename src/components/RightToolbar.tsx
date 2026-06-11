@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { IconButton } from "./IconButton";
-import { Folder, Search, GitBranch, History, Settings, Terminal } from "lucide-react";
+import { Folder, Search, GitBranch, History, Settings, Terminal, GitFork } from "lucide-react";
 import { useI18n } from "../i18n";
 import type { RightPanel } from "../hooks/useProjectPanels";
 
@@ -26,6 +26,7 @@ export function RightToolbar({
     title: string;
   }> = [
     { key: "files", icon: <Folder size={17} />, title: t("toolbar.fileExplorer") },
+    { key: "worktrees", icon: <GitFork size={17} />, title: t("toolbar.worktrees") },
     { key: "git-changes", icon: <GitBranch size={17} />, title: t("toolbar.gitChanges") },
     { key: "git-history", icon: <History size={17} />, title: t("toolbar.gitHistory") },
   ];

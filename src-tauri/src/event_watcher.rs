@@ -26,7 +26,7 @@ use std::thread;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::session::{ClaudeSessionInfo, CodexSessionInfo};
@@ -36,7 +36,7 @@ use crate::TaskManager;
 /// 间隔——即便漏掉某次文件事件,最坏也在此间隔内被重新扫描到。
 const FALLBACK_INTERVAL: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct HookEvent {
     #[serde(default)]
     task_id: String,
@@ -48,6 +48,32 @@ struct HookEvent {
     session_id: String,
     #[serde(default)]
     transcript_path: String,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HookEventEnvelope {
+    id: String,
+    task_id: String,
+    agent: String,
+    event: String,
+    normalized_status: Option<String>,
+    session_id: Option<String>,
+    transcript_path: Option<String>,
+    raw: serde_json::Value,
+    parse_error: Option<String>,
+    source_path: String,
+    offset: u64,
+}
+
+fn normalized_status_for_event(event: &str) -> Option<&'static str> {
+    match event {
+        "Notification" | "PermissionRequest" | "Stop" => Some("input_required"),
+        "UserPromptSubmit" | "PostToolUse" => Some("running"),
+        _ => None,
+    }
 }
 
 pub fn start(app: AppHandle) {
@@ -122,10 +148,11 @@ fn run_loop(app: AppHandle) {
 fn read_and_dispatch(app: &AppHandle, path: &PathBuf, offset: u64) -> Option<u64> {
     let mut file = fs::File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
-    if size <= offset {
-        return Some(offset);
+    let start_offset = if size < offset { 0 } else { offset };
+    if size <= start_offset {
+        return Some(start_offset);
     }
-    file.seek(SeekFrom::Start(offset)).ok()?;
+    file.seek(SeekFrom::Start(start_offset)).ok()?;
     let mut buf = String::new();
     file.read_to_string(&mut buf).ok()?;
 
@@ -134,16 +161,76 @@ fn read_and_dispatch(app: &AppHandle, path: &PathBuf, offset: u64) -> Option<u64
     for (idx, ch) in buf.char_indices() {
         if ch == '\n' {
             let line = &buf[last_complete_end..idx];
+            let line_offset = start_offset + last_complete_end as u64;
             last_complete_end = idx + 1;
             if line.trim().is_empty() {
                 continue;
             }
-            if let Ok(ev) = serde_json::from_str::<HookEvent>(line) {
-                dispatch(app, &ev);
-            }
+            dispatch_line(app, path, line_offset, line);
         }
     }
-    Some(offset + last_complete_end as u64)
+    Some(start_offset + last_complete_end as u64)
+}
+
+fn dispatch_line(app: &AppHandle, path: &PathBuf, offset: u64, line: &str) {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(raw) => match serde_json::from_value::<HookEvent>(raw.clone()) {
+            Ok(ev) => {
+                emit_task_event(app, path, offset, &ev, raw, None);
+                dispatch(app, &ev);
+            }
+            Err(error) => emit_parse_error_event(app, path, offset, line, error.to_string()),
+        },
+        Err(error) => emit_parse_error_event(app, path, offset, line, error.to_string()),
+    }
+}
+
+fn emit_task_event(
+    app: &AppHandle,
+    path: &PathBuf,
+    offset: u64,
+    ev: &HookEvent,
+    raw: serde_json::Value,
+    parse_error: Option<String>,
+) {
+    if ev.task_id.is_empty() {
+        return;
+    }
+    let event_name = if ev.event.is_empty() { "unknown" } else { &ev.event };
+    let _ = app.emit(
+        "task-event",
+        HookEventEnvelope {
+            id: format!("{}:{}:{}", path.display(), offset, event_name),
+            task_id: ev.task_id.clone(),
+            agent: ev.agent.clone(),
+            event: event_name.to_string(),
+            normalized_status: normalized_status_for_event(event_name).map(str::to_string),
+            session_id: (!ev.session_id.is_empty()).then(|| ev.session_id.clone()),
+            transcript_path: (!ev.transcript_path.is_empty()).then(|| ev.transcript_path.clone()),
+            raw,
+            parse_error,
+            source_path: path.to_string_lossy().into_owned(),
+            offset,
+        },
+    );
+}
+
+fn emit_parse_error_event(app: &AppHandle, path: &PathBuf, offset: u64, line: &str, error: String) {
+    let raw = serde_json::json!({ "line": line });
+    let ev = HookEvent {
+        task_id: path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .to_string(),
+        agent: String::new(),
+        event: "ParseError".to_string(),
+        session_id: String::new(),
+        transcript_path: String::new(),
+        extra: serde_json::Map::new(),
+    };
+    emit_task_event(app, path, offset, &ev, raw, Some(error));
 }
 
 fn dispatch(app: &AppHandle, ev: &HookEvent) {

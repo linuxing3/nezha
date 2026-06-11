@@ -617,9 +617,16 @@ fn process_claude_session_line(
 // ── Session messages (for conversation view) ──────────────────────────────────
 
 #[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SessionMessage {
     role: String,
     content: Vec<SessionContent>,
+    /// Stable-enough frontend key. Prefer provider IDs when present; otherwise use source + line.
+    id: String,
+    source: String,
+    timestamp: Option<String>,
+    line: u64,
+    offset: u64,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -633,25 +640,283 @@ pub(crate) enum SessionContent {
         name: String,
         input: String,
     },
+    ToolResult {
+        #[serde(rename = "toolUseId")]
+        tool_use_id: String,
+        content: String,
+        #[serde(rename = "isError")]
+        is_error: bool,
+    },
     Thinking {
         thinking: String,
     },
+    Error {
+        message: String,
+    },
+    RawEvent {
+        label: String,
+        raw: serde_json::Value,
+    },
+}
+
+#[derive(Clone)]
+struct SessionLine {
+    line_no: u64,
+    offset: u64,
+    text: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionMessagesPage {
+    messages: Vec<SessionMessage>,
+    next_cursor: u64,
+    has_more: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionRawEvent {
+    id: String,
+    source: String,
+    line: u64,
+    offset: u64,
+    kind: String,
+    role: Option<String>,
+    timestamp: Option<String>,
+    raw: serde_json::Value,
+    parse_error: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionRawEventPage {
+    events: Vec<SessionRawEvent>,
+    next_cursor: u64,
+    has_more: bool,
+}
+
+fn make_session_message(
+    source: &str,
+    role: &str,
+    line: &SessionLine,
+    value: &serde_json::Value,
+    content: Vec<SessionContent>,
+) -> SessionMessage {
+    let provider_id = value
+        .get("uuid")
+        .or_else(|| value.get("id"))
+        .or_else(|| value.get("message").and_then(|m| m.get("id")))
+        .or_else(|| value.get("payload").and_then(|p| p.get("id")))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let id = provider_id.unwrap_or_else(|| format!("{}:{}:{}", source, line.offset, line.line_no));
+    let timestamp = value
+        .get("timestamp")
+        .or_else(|| value.get("created_at"))
+        .or_else(|| value.get("payload").and_then(|p| p.get("timestamp")))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+
+    SessionMessage {
+        role: role.to_string(),
+        content,
+        id,
+        source: source.to_string(),
+        timestamp,
+        line: line.line_no,
+        offset: line.offset,
+    }
 }
 
 #[tauri::command]
 pub async fn read_session_messages(session_path: String) -> Result<Vec<SessionMessage>, String> {
-    let content = std::fs::read_to_string(&session_path).map_err(|e| e.to_string())?;
-    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    if is_codex_format(&lines) {
-        Ok(parse_codex_session(&lines))
+    tokio::task::spawn_blocking(move || read_session_messages_inner(&session_path, None, None))
+        .await
+        .map_err(|e| format!("Session parser task failed: {}", e))?
+        .map(|page| page.messages)
+}
+
+#[tauri::command]
+pub async fn read_session_messages_page(
+    session_path: String,
+    cursor: Option<u64>,
+    limit: Option<usize>,
+) -> Result<SessionMessagesPage, String> {
+    tokio::task::spawn_blocking(move || read_session_messages_inner(&session_path, cursor, limit))
+        .await
+        .map_err(|e| format!("Session parser task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn read_session_events_since(
+    session_path: String,
+    cursor: Option<u64>,
+    limit: Option<usize>,
+) -> Result<SessionRawEventPage, String> {
+    tokio::task::spawn_blocking(move || read_session_events_inner(&session_path, cursor, limit))
+        .await
+        .map_err(|e| format!("Session event parser task failed: {}", e))?
+}
+
+fn read_session_messages_inner(
+    session_path: &str,
+    cursor: Option<u64>,
+    limit: Option<usize>,
+) -> Result<SessionMessagesPage, String> {
+    let lines = read_session_line_page(session_path, cursor.unwrap_or(0), limit.unwrap_or(500))?;
+    let is_codex = detect_codex_format(session_path).unwrap_or_else(|| is_codex_format(&lines.items));
+    let messages = if is_codex {
+        parse_codex_session(&lines.items)
     } else {
-        Ok(parse_claude_session(&lines))
+        parse_claude_session(&lines.items)
+    };
+    Ok(SessionMessagesPage {
+        messages,
+        next_cursor: lines.next_cursor,
+        has_more: lines.has_more,
+    })
+}
+
+fn read_session_events_inner(
+    session_path: &str,
+    cursor: Option<u64>,
+    limit: Option<usize>,
+) -> Result<SessionRawEventPage, String> {
+    let lines = read_session_line_page(session_path, cursor.unwrap_or(0), limit.unwrap_or(500))?;
+    let is_codex = detect_codex_format(session_path).unwrap_or_else(|| is_codex_format(&lines.items));
+    let source = if is_codex { "codex" } else { "claude" };
+    let events = lines
+        .items
+        .iter()
+        .map(|line| raw_event_from_line(source, line))
+        .collect();
+    Ok(SessionRawEventPage {
+        events,
+        next_cursor: lines.next_cursor,
+        has_more: lines.has_more,
+    })
+}
+
+struct SessionLinePage {
+    items: Vec<SessionLine>,
+    next_cursor: u64,
+    has_more: bool,
+}
+
+fn read_session_line_page(
+    session_path: &str,
+    cursor: u64,
+    limit: usize,
+) -> Result<SessionLinePage, String> {
+    let limit = limit.clamp(1, 500);
+    let file = File::open(session_path).map_err(|e| e.to_string())?;
+    let file_len = file.metadata().map_err(|e| e.to_string())?.len();
+    let mut reader = BufReader::new(file);
+    reader
+        .seek(SeekFrom::Start(cursor.min(file_len)))
+        .map_err(|e| e.to_string())?;
+
+    let mut items = Vec::new();
+    let mut offset = cursor.min(file_len);
+    let mut line_no = 0u64;
+    let mut buf = String::new();
+
+    while items.len() < limit {
+        buf.clear();
+        let read = reader.read_line(&mut buf).map_err(|e| e.to_string())?;
+        if read == 0 {
+            break;
+        }
+        let line_offset = offset;
+        offset += read as u64;
+        line_no += 1;
+        let text = buf.trim_end_matches(['\r', '\n']).to_string();
+        if text.trim().is_empty() {
+            continue;
+        }
+        items.push(SessionLine {
+            line_no,
+            offset: line_offset,
+            text,
+        });
+    }
+
+    Ok(SessionLinePage {
+        items,
+        next_cursor: offset,
+        has_more: offset < file_len,
+    })
+}
+
+fn raw_event_from_line(source: &str, line: &SessionLine) -> SessionRawEvent {
+    match serde_json::from_str::<serde_json::Value>(&line.text) {
+        Ok(value) => {
+            let kind = value
+                .get("type")
+                .or_else(|| value.get("event"))
+                .or_else(|| value.get("payload").and_then(|p| p.get("type")))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let role = value
+                .get("message")
+                .and_then(|m| m.get("role"))
+                .or_else(|| value.get("payload").and_then(|p| p.get("role")))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let timestamp = value
+                .get("timestamp")
+                .or_else(|| value.get("created_at"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            SessionRawEvent {
+                id: format!("{}:{}:{}", source, line.offset, kind),
+                source: source.to_string(),
+                line: line.line_no,
+                offset: line.offset,
+                kind,
+                role,
+                timestamp,
+                raw: value,
+                parse_error: None,
+            }
+        }
+        Err(error) => SessionRawEvent {
+            id: format!("{}:{}:parse-error", source, line.offset),
+            source: source.to_string(),
+            line: line.line_no,
+            offset: line.offset,
+            kind: "parse_error".to_string(),
+            role: None,
+            timestamp: None,
+            raw: serde_json::json!({ "line": line.text }),
+            parse_error: Some(error.to_string()),
+        },
     }
 }
 
-fn is_codex_format(lines: &[&str]) -> bool {
+fn detect_codex_format(session_path: &str) -> Option<bool> {
+    let file = File::open(session_path).ok()?;
+    let reader = BufReader::new(file);
+    let items: Vec<SessionLine> = reader
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| !line.trim().is_empty())
+        .take(10)
+        .enumerate()
+        .map(|(idx, text)| SessionLine {
+            line_no: (idx + 1) as u64,
+            offset: 0,
+            text,
+        })
+        .collect();
+    Some(is_codex_format(&items))
+}
+
+fn is_codex_format(lines: &[SessionLine]) -> bool {
     for line in lines.iter().take(10) {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line.text) {
             match val.get("type").and_then(|v| v.as_str()) {
                 Some("session_meta") | Some("event_msg") => return true,
                 _ => {}
@@ -661,15 +926,36 @@ fn is_codex_format(lines: &[&str]) -> bool {
     false
 }
 
-fn parse_claude_session(lines: &[&str]) -> Vec<SessionMessage> {
+fn parse_claude_session(lines: &[SessionLine]) -> Vec<SessionMessage> {
     let mut messages = Vec::new();
 
     for line in lines {
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line.text) else {
+            messages.push(make_session_message(
+                "claude",
+                "system",
+                line,
+                &serde_json::Value::Null,
+                vec![SessionContent::Error {
+                    message: "Invalid JSONL record".to_string(),
+                }],
+            ));
             continue;
         };
         let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let Some(message) = val.get("message") else {
+            if !matches!(msg_type, "summary" | "system") {
+                messages.push(make_session_message(
+                    "claude",
+                    "system",
+                    line,
+                    &val,
+                    vec![SessionContent::RawEvent {
+                        label: msg_type.to_string(),
+                        raw: val.clone(),
+                    }],
+                ));
+            }
             continue;
         };
 
@@ -677,30 +963,61 @@ fn parse_claude_session(lines: &[&str]) -> Vec<SessionMessage> {
             "user" => {
                 let parts = claude_user_content(message.get("content"));
                 if !parts.is_empty() {
-                    messages.push(SessionMessage {
-                        role: "user".to_string(),
-                        content: parts,
-                    });
+                    messages.push(make_session_message("claude", "user", line, &val, parts));
                 }
             }
             "assistant" => {
                 let parts = message
                     .get("content")
                     .and_then(|c| c.as_array())
-                    .map(|arr| claude_assistant_blocks(arr))
+                    .map(claude_assistant_blocks)
                     .unwrap_or_default();
                 if !parts.is_empty() {
-                    messages.push(SessionMessage {
-                        role: "assistant".to_string(),
-                        content: parts,
-                    });
+                    messages.push(make_session_message("claude", "assistant", line, &val, parts));
                 }
             }
-            _ => {}
+            _ => {
+                messages.push(make_session_message(
+                    "claude",
+                    "system",
+                    line,
+                    &val,
+                    vec![SessionContent::RawEvent {
+                        label: msg_type.to_string(),
+                        raw: val.clone(),
+                    }],
+                ));
+            }
         }
     }
 
     messages
+}
+
+fn json_to_display(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        _ => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+    }
+}
+
+fn claude_tool_result_content(block: &serde_json::Value) -> String {
+    match block.get("content") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|item| {
+                if item.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    item.get("text").and_then(|v| v.as_str()).map(str::to_string)
+                } else {
+                    Some(json_to_display(item))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(other) => json_to_display(other),
+        None => String::new(),
+    }
 }
 
 fn claude_user_content(content: Option<&serde_json::Value>) -> Vec<SessionContent> {
@@ -710,16 +1027,27 @@ fn claude_user_content(content: Option<&serde_json::Value>) -> Vec<SessionConten
         }
         Some(serde_json::Value::Array(blocks)) => blocks
             .iter()
-            .filter_map(|b| {
-                if b.get("type").and_then(|v| v.as_str()) == Some("text") {
+            .filter_map(|b| match b.get("type").and_then(|v| v.as_str()) {
+                Some("text") => {
                     let text = b.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    if !text.trim().is_empty() {
-                        return Some(SessionContent::Text {
-                            text: text.to_string(),
-                        });
-                    }
+                    (!text.trim().is_empty()).then(|| SessionContent::Text {
+                        text: text.to_string(),
+                    })
                 }
-                None
+                Some("tool_result") => Some(SessionContent::ToolResult {
+                    tool_use_id: b
+                        .get("tool_use_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    content: claude_tool_result_content(b),
+                    is_error: b.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false),
+                }),
+                Some(other) => Some(SessionContent::RawEvent {
+                    label: other.to_string(),
+                    raw: b.clone(),
+                }),
+                None => None,
             })
             .collect(),
         _ => Vec::new(),
@@ -752,7 +1080,7 @@ fn claude_assistant_blocks(blocks: &[serde_json::Value]) -> Vec<SessionContent> 
                     .to_string();
                 let input = block
                     .get("input")
-                    .and_then(|v| serde_json::to_string_pretty(v).ok())
+                    .map(json_to_display)
                     .unwrap_or_default();
                 parts.push(SessionContent::ToolUse { id, name, input });
             }
@@ -765,17 +1093,84 @@ fn claude_assistant_blocks(blocks: &[serde_json::Value]) -> Vec<SessionContent> 
                     }
                 }
             }
+            Some("tool_result") => parts.push(SessionContent::ToolResult {
+                tool_use_id: block
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                content: claude_tool_result_content(block),
+                is_error: block
+                    .get("is_error")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            }),
+            Some(other) => parts.push(SessionContent::RawEvent {
+                label: other.to_string(),
+                raw: block.clone(),
+            }),
             _ => {}
         }
     }
     parts
 }
 
-fn parse_codex_session(lines: &[&str]) -> Vec<SessionMessage> {
+fn codex_payload_text_content(payload: Option<&serde_json::Value>) -> Vec<SessionContent> {
+    payload
+        .and_then(|p| p.get("content"))
+        .and_then(|v| v.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| match b.get("type").and_then(|v| v.as_str()) {
+                    Some("output_text") | Some("input_text") | Some("text") => {
+                        let text = b.get("text").and_then(|v| v.as_str())?;
+                        (!text.trim().is_empty()).then(|| SessionContent::Text {
+                            text: text.to_string(),
+                        })
+                    }
+                    Some("reasoning_text") | Some("summary_text") => {
+                        let thinking = b.get("text").and_then(|v| v.as_str())?;
+                        (!thinking.trim().is_empty()).then(|| SessionContent::Thinking {
+                            thinking: thinking.to_string(),
+                        })
+                    }
+                    Some(other) => Some(SessionContent::RawEvent {
+                        label: other.to_string(),
+                        raw: b.clone(),
+                    }),
+                    None => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn codex_function_arguments(payload: Option<&serde_json::Value>) -> String {
+    let raw = payload
+        .and_then(|p| p.get("arguments"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("{}");
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| raw.to_string())
+}
+
+fn parse_codex_session(lines: &[SessionLine]) -> Vec<SessionMessage> {
     let mut messages: Vec<SessionMessage> = Vec::new();
 
     for line in lines {
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line.text) else {
+            messages.push(make_session_message(
+                "codex",
+                "system",
+                line,
+                &serde_json::Value::Null,
+                vec![SessionContent::Error {
+                    message: "Invalid JSONL record".to_string(),
+                }],
+            ));
             continue;
         };
         let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -793,13 +1188,27 @@ fn parse_codex_session(lines: &[&str]) -> Vec<SessionMessage> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     if !text.trim().is_empty() {
-                        messages.push(SessionMessage {
-                            role: "user".to_string(),
-                            content: vec![SessionContent::Text {
+                        messages.push(make_session_message(
+                            "codex",
+                            "user",
+                            line,
+                            &val,
+                            vec![SessionContent::Text {
                                 text: text.to_string(),
                             }],
-                        });
+                        ));
                     }
+                } else if !payload_type.is_empty() {
+                    messages.push(make_session_message(
+                        "codex",
+                        "system",
+                        line,
+                        &val,
+                        vec![SessionContent::RawEvent {
+                            label: payload_type.to_string(),
+                            raw: val.clone(),
+                        }],
+                    ));
                 }
             }
             "response_item" => {
@@ -813,78 +1222,104 @@ fn parse_codex_session(lines: &[&str]) -> Vec<SessionMessage> {
                         let role = payload
                             .and_then(|p| p.get("role"))
                             .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if role != "assistant" {
-                            continue;
-                        }
-                        let parts: Vec<SessionContent> = payload
-                            .and_then(|p| p.get("content"))
-                            .and_then(|v| v.as_array())
-                            .map(|blocks| {
-                                blocks
-                                    .iter()
-                                    .filter_map(|b| {
-                                        let t = b.get("type").and_then(|v| v.as_str())?;
-                                        if matches!(t, "output_text" | "text") {
-                                            let text = b.get("text").and_then(|v| v.as_str())?;
-                                            if !text.trim().is_empty() {
-                                                return Some(SessionContent::Text {
-                                                    text: text.to_string(),
-                                                });
-                                            }
-                                        }
-                                        None
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+                            .unwrap_or("assistant");
+                        let parts = codex_payload_text_content(payload);
                         if !parts.is_empty() {
-                            if messages.last().map(|m| m.role.as_str()) == Some("assistant") {
-                                messages.last_mut().unwrap().content.extend(parts);
-                            } else {
-                                messages.push(SessionMessage {
-                                    role: "assistant".to_string(),
-                                    content: parts,
-                                });
-                            }
+                            messages.push(make_session_message("codex", role, line, &val, parts));
                         }
                     }
-                    "function_call" => {
+                    "function_call" | "custom_tool_call" | "mcp_tool_call" => {
                         let call_id = payload
                             .and_then(|p| p.get("call_id"))
+                            .or_else(|| payload.and_then(|p| p.get("id")))
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
                         let name = payload
                             .and_then(|p| p.get("name"))
+                            .or_else(|| payload.and_then(|p| p.get("server_label")))
                             .and_then(|v| v.as_str())
-                            .unwrap_or("")
+                            .unwrap_or(payload_type)
                             .to_string();
-                        let raw = payload
-                            .and_then(|p| p.get("arguments"))
+                        messages.push(make_session_message(
+                            "codex",
+                            "assistant",
+                            line,
+                            &val,
+                            vec![SessionContent::ToolUse {
+                                id: call_id,
+                                name,
+                                input: codex_function_arguments(payload),
+                            }],
+                        ));
+                    }
+                    "function_call_output" | "custom_tool_call_output" => {
+                        let content = payload
+                            .and_then(|p| p.get("output"))
+                            .map(json_to_display)
+                            .unwrap_or_default();
+                        let is_error = payload
+                            .and_then(|p| p.get("status"))
                             .and_then(|v| v.as_str())
-                            .unwrap_or("{}");
-                        let input = serde_json::from_str::<serde_json::Value>(raw)
-                            .ok()
-                            .and_then(|v| serde_json::to_string_pretty(&v).ok())
-                            .unwrap_or_else(|| raw.to_string());
-                        let part = SessionContent::ToolUse {
-                            id: call_id,
-                            name,
-                            input,
-                        };
-                        if messages.last().map(|m| m.role.as_str()) == Some("assistant") {
-                            messages.last_mut().unwrap().content.push(part);
-                        } else {
-                            messages.push(SessionMessage {
-                                role: "assistant".to_string(),
-                                content: vec![part],
-                            });
+                            .map(|status| status == "failed" || status == "error")
+                            .unwrap_or(false);
+                        messages.push(make_session_message(
+                            "codex",
+                            "assistant",
+                            line,
+                            &val,
+                            vec![SessionContent::ToolResult {
+                                tool_use_id: payload
+                                    .and_then(|p| p.get("call_id"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                content,
+                                is_error,
+                            }],
+                        ));
+                    }
+                    "reasoning" => {
+                        let text = payload
+                            .and_then(|p| p.get("text"))
+                            .or_else(|| payload.and_then(|p| p.get("summary")))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !text.trim().is_empty() {
+                            messages.push(make_session_message(
+                                "codex",
+                                "assistant",
+                                line,
+                                &val,
+                                vec![SessionContent::Thinking {
+                                    thinking: text.to_string(),
+                                }],
+                            ));
                         }
                     }
+                    _ if !payload_type.is_empty() => messages.push(make_session_message(
+                        "codex",
+                        "system",
+                        line,
+                        &val,
+                        vec![SessionContent::RawEvent {
+                            label: payload_type.to_string(),
+                            raw: val.clone(),
+                        }],
+                    )),
                     _ => {}
                 }
             }
+            _ if !event_type.is_empty() => messages.push(make_session_message(
+                "codex",
+                "system",
+                line,
+                &val,
+                vec![SessionContent::RawEvent {
+                    label: event_type.to_string(),
+                    raw: val.clone(),
+                }],
+            )),
             _ => {}
         }
     }
@@ -987,13 +1422,20 @@ pub(crate) fn extract_session_summary_text(
         }
     }
     head.extend(tail);
-    let lines = head;
-    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let line_items: Vec<SessionLine> = head
+        .into_iter()
+        .enumerate()
+        .map(|(idx, text)| SessionLine {
+            line_no: (idx + 1) as u64,
+            offset: 0,
+            text,
+        })
+        .collect();
 
-    let messages = if is_codex_format(&line_refs) {
-        parse_codex_session(&line_refs)
+    let messages = if is_codex_format(&line_items) {
+        parse_codex_session(&line_items)
     } else {
-        parse_claude_session(&line_refs)
+        parse_claude_session(&line_items)
     };
 
     let formatted: Vec<String> = messages
@@ -1709,18 +2151,24 @@ fn export_session_markdown_inner(
     // （它们消费 &[&str]），收益不抵复杂度。
     let session_file = File::open(&canonical)
         .map_err(|e| format!("Cannot open session file: {}", e))?;
-    let mut lines: Vec<String> = Vec::new();
-    for line in BufReader::new(session_file).lines() {
+    let mut line_items: Vec<SessionLine> = Vec::new();
+    let mut offset = 0u64;
+    for (idx, line) in BufReader::new(session_file).lines().enumerate() {
         let line = line.map_err(|e| format!("Cannot read session file: {}", e))?;
+        let line_offset = offset;
+        offset += line.as_bytes().len() as u64 + 1;
         if !line.trim().is_empty() {
-            lines.push(line);
+            line_items.push(SessionLine {
+                line_no: (idx + 1) as u64,
+                offset: line_offset,
+                text: line,
+            });
         }
     }
-    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let messages = if is_codex_format(&line_refs) {
-        parse_codex_session(&line_refs)
+    let messages = if is_codex_format(&line_items) {
+        parse_codex_session(&line_items)
     } else {
-        parse_claude_session(&line_refs)
+        parse_claude_session(&line_items)
     };
 
     // 直接写到 BufWriter，避免先构建一整段 Markdown String 再 write。
@@ -2102,6 +2550,18 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
+    fn test_message(role: &str, content: Vec<SessionContent>) -> SessionMessage {
+        SessionMessage {
+            role: role.into(),
+            content,
+            id: format!("test-{}", role),
+            source: "test".into(),
+            timestamp: None,
+            line: 0,
+            offset: 0,
+        }
+    }
+
     #[test]
     fn export_markdown_includes_metadata_and_prompt() {
         let md = render_to_string(&sample_meta(), &[]);
@@ -2114,9 +2574,9 @@ mod tests {
     #[test]
     fn export_markdown_drops_tool_use_and_thinking_blocks() {
         let messages = vec![
-            SessionMessage {
-                role: "assistant".into(),
-                content: vec![
+            test_message(
+                "assistant",
+                vec![
                     SessionContent::Thinking {
                         thinking: "let me reason".into(),
                     },
@@ -2124,21 +2584,21 @@ mod tests {
                         text: "first turn".into(),
                     },
                 ],
-            },
-            SessionMessage {
-                role: "assistant".into(),
-                content: vec![SessionContent::ToolUse {
+            ),
+            test_message(
+                "assistant",
+                vec![SessionContent::ToolUse {
                     id: "t1".into(),
                     name: "Bash".into(),
                     input: "{\"cmd\":\"ls\"}".into(),
                 }],
-            },
-            SessionMessage {
-                role: "assistant".into(),
-                content: vec![SessionContent::Text {
+            ),
+            test_message(
+                "assistant",
+                vec![SessionContent::Text {
                     text: "second turn".into(),
                 }],
-            },
+            ),
         ];
         let md = render_to_string(&sample_meta(), &messages);
         // 连续 assistant 文本应合并到同一个标题下；tool-only 消息被整体丢弃

@@ -463,6 +463,28 @@ pub async fn create_directory(path: String, project_path: String) -> Result<(), 
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub async fn rename_path(path: String, new_name: String, project_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = validate_path_within(&path, &project_path, false)?;
+        validate_entry_name(new_name.trim())?;
+        let parent = source
+            .parent()
+            .ok_or_else(|| "Cannot resolve parent directory".to_string())?;
+        let target = parent.join(new_name.trim());
+        let target_str = target
+            .to_str()
+            .ok_or_else(|| "Path contains invalid UTF-8".to_string())?
+            .to_string();
+        let (canonical_parent, file_name) = validate_new_path_within(&target_str, &project_path)?;
+        let validated_target = canonical_parent.join(file_name);
+        std::fs::rename(&source, &validated_target).map_err(|e| e.to_string())?;
+        Ok(validated_target.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// First-segment names under the project root that are never deletable through this command.
 const PROTECTED_FIRST_SEGMENTS: &[&str] = &[".git", ".nezha"];
 

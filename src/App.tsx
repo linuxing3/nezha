@@ -14,6 +14,7 @@ import type {
   TerminalFontSize,
   TaskDisplayWindow,
   SkillHubConfig,
+  TaskEventPayload,
 } from "./types";
 import {
   isActiveTaskStatus,
@@ -132,6 +133,20 @@ function shouldIgnoreTaskStatusTransition(current: TaskStatus, next: TaskStatus)
 
 function isLiveTerminalTaskStatus(status: TaskStatus): boolean {
   return status === "pending" || status === "running" || status === "input_required";
+}
+
+function isTaskStatus(value: unknown): value is TaskStatus {
+  return (
+    value === "todo" ||
+    value === "pending" ||
+    value === "running" ||
+    value === "input_required" ||
+    value === "detached" ||
+    value === "interrupted" ||
+    value === "done" ||
+    value === "failed" ||
+    value === "cancelled"
+  );
 }
 
 function getSystemPrefersDark() {
@@ -421,9 +436,27 @@ function App() {
         updateTaskSession(task_id, session_id, session_path);
       },
     );
+    const p3 = listen<TaskEventPayload>("task-event", (e) => {
+      const payload = e.payload;
+      if (payload.parseError) {
+        console.warn("Failed to parse task hook event", payload);
+        return;
+      }
+
+      // `task-status` and `task-session` remain the authoritative update channels.
+      // The full `task-event` envelope is consumed here as a parity/fallback signal so
+      // no watcher event is effectively dropped if an emit is missed or reordered.
+      if (payload.sessionId && payload.transcriptPath) {
+        updateTaskSession(payload.taskId, payload.sessionId, payload.transcriptPath);
+      }
+      if (isTaskStatus(payload.normalizedStatus)) {
+        updateTaskStatus(payload.taskId, payload.normalizedStatus);
+      }
+    });
     return () => {
       p1.then((fn) => fn());
       p2.then((fn) => fn());
+      p3.then((fn) => fn());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

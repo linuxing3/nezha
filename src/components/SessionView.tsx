@@ -1,254 +1,77 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown, ChevronRight, Wrench, Copy, Check } from "lucide-react";
-import { marked } from "marked";
+import { RotateCcw } from "lucide-react";
+import type { SessionMessage, SessionMessagesPage } from "../types";
 import { useI18n } from "../i18n";
+import { MessageBlock } from "./session-view/MessageBlock";
 
-interface SessionContent {
-  type: "text" | "tool_use" | "thinking";
-  text?: string;
-  id?: string;
-  name?: string;
-  input?: string;
-  thinking?: string;
-}
-
-interface SessionMessage {
-  role: "user" | "assistant";
-  content: SessionContent[];
-}
-
-function ToolUseCard({ name, input }: { name: string; input: string }) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <div
-      style={{
-        margin: "6px 0",
-        border: "1px solid var(--border-dim)",
-        borderRadius: 6,
-        overflow: "hidden",
-        fontSize: 12,
-      }}
-    >
-      <button
-        onClick={() => setExpanded((e) => !e)}
-        style={{
-          width: "100%",
-          display: "flex",
-          alignItems: "center",
-          gap: 7,
-          padding: "5px 10px",
-          background: "var(--bg-input)",
-          border: "none",
-          cursor: "pointer",
-          textAlign: "left",
-          color: "var(--text-secondary)",
-        }}
-      >
-        {expanded ? (
-          <ChevronDown size={11} style={{ flexShrink: 0 }} />
-        ) : (
-          <ChevronRight size={11} style={{ flexShrink: 0 }} />
-        )}
-        <Wrench size={11} style={{ color: "var(--text-hint)", flexShrink: 0 }} />
-        <span
-          style={{ fontFamily: "var(--font-mono)", fontWeight: 600 }}
-        >
-          {name}
-        </span>
-      </button>
-      {expanded && (
-        <pre
-          style={{
-            margin: 0,
-            padding: "8px 12px",
-            fontSize: 11,
-            fontFamily: "var(--font-mono)",
-            color: "var(--text-secondary)",
-            background: "var(--bg-root)",
-            overflowX: "auto",
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-all",
-            maxHeight: 280,
-            overflowY: "auto",
-          }}
-        >
-          {input}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-function ThinkingBlock({ thinking }: { thinking: string }) {
-  const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <div style={{ marginBottom: 6 }}>
-      <button
-        onClick={() => setExpanded((e) => !e)}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 5,
-          background: "none",
-          border: "none",
-          cursor: "pointer",
-          padding: "2px 0",
-          color: "var(--text-hint)",
-          fontSize: 11.5,
-          fontStyle: "italic",
-        }}
-      >
-        {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-        <span>{t("session.thinking")}</span>
-      </button>
-      {expanded && (
-        <div
-          style={{
-            padding: "6px 12px",
-            fontSize: 12,
-            color: "var(--text-muted)",
-            fontStyle: "italic",
-            borderLeft: "2px solid var(--border-dim)",
-            marginLeft: 4,
-            marginTop: 4,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            lineHeight: 1.55,
-          }}
-        >
-          {thinking}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function UserMessageBubble({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  };
-
-  return (
-    <div style={{ marginBottom: 14, display: "flex", justifyContent: "flex-end" }}>
-      <div
-        style={{ maxWidth: "72%", position: "relative" }}
-        className="user-message-bubble"
-        onMouseEnter={(e) => {
-          const btn = (e.currentTarget as HTMLElement).querySelector(
-            ".copy-btn",
-          ) as HTMLElement | null;
-          if (btn) btn.style.opacity = "1";
-        }}
-        onMouseLeave={(e) => {
-          const btn = (e.currentTarget as HTMLElement).querySelector(
-            ".copy-btn",
-          ) as HTMLElement | null;
-          if (btn) btn.style.opacity = "0";
-        }}
-      >
-        <button
-          className="copy-btn"
-          onClick={handleCopy}
-          style={{
-            position: "absolute",
-            top: 6,
-            right: 8,
-            opacity: 0,
-            transition: "opacity 0.15s",
-            background: "none",
-            border: "none",
-            cursor: "pointer",
-            padding: 2,
-            color: "var(--text-muted)",
-            display: "flex",
-            alignItems: "center",
-          }}
-        >
-          {copied ? <Check size={13} /> : <Copy size={13} />}
-        </button>
-        <div
-          style={{
-            padding: "10px 16px",
-            background: "var(--bg-subtle)",
-            color: "var(--text-primary)",
-            borderRadius: 20,
-            fontSize: 13.5,
-            lineHeight: 1.6,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-          }}
-        >
-          {text}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MessageBlock({ message }: { message: SessionMessage }) {
-  const isUser = message.role === "user";
-
-  if (isUser) {
-    const text = message.content
-      .filter((c) => c.type === "text")
-      .map((c) => c.text ?? "")
-      .join("\n");
-    if (!text.trim()) return null;
-    return <UserMessageBubble text={text} />;
-  }
-
-  const textParts = message.content.filter((c) => c.type === "text");
-  const toolParts = message.content.filter((c) => c.type === "tool_use");
-  const thinkingParts = message.content.filter((c) => c.type === "thinking");
-
-  if (textParts.length === 0 && toolParts.length === 0 && thinkingParts.length === 0) return null;
-
-  return (
-    <div style={{ marginBottom: 18 }}>
-      {thinkingParts.map((t, i) => (
-        <ThinkingBlock key={i} thinking={t.thinking ?? ""} />
-      ))}
-      {textParts.map((t, i) => (
-        <div
-          key={i}
-          className="session-prose"
-          dangerouslySetInnerHTML={{ __html: marked(t.text ?? "", { async: false }) as string }}
-        />
-      ))}
-      {toolParts.map((t, i) => (
-        <ToolUseCard key={i} name={t.name ?? ""} input={t.input ?? ""} />
-      ))}
-    </div>
-  );
-}
+const PAGE_LIMIT = 500;
+const LIVE_REFRESH_MS = 1500;
 
 export function SessionView({ sessionPath }: { sessionPath: string }) {
   const { t } = useI18n();
   const [messages, setMessages] = useState<SessionMessage[]>([]);
+  const [cursor, setCursor] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
+  const loadPage = async (nextCursor: number | null, append: boolean) => {
+    const page = await invoke<SessionMessagesPage>("read_session_messages_page", {
+      sessionPath,
+      cursor: nextCursor,
+      limit: PAGE_LIMIT,
+    });
+    setCursor(page.nextCursor);
+    setHasMore(page.hasMore);
+    setMessages((prev) => (append ? [...prev, ...page.messages] : page.messages));
+  };
+
+  const reload = () => {
     setLoading(true);
     setError(null);
-    invoke<SessionMessage[]>("read_session_messages", { sessionPath })
-      .then((msgs) => {
-        setMessages(msgs);
-        setLoading(false);
-      })
-      .catch((err) => {
-        setError(String(err));
-        setLoading(false);
-      });
+    loadPage(null, false)
+      .catch((err) => setError(String(err)))
+      .finally(() => setLoading(false));
+  };
+
+  const loadMore = () => {
+    if (loadingMore || cursor === null) return;
+    setLoadingMore(true);
+    loadPage(cursor, true)
+      .catch((err) => setError(String(err)))
+      .finally(() => setLoadingMore(false));
+  };
+
+  useEffect(() => {
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionPath]);
+
+  useEffect(() => {
+    if (loading || hasMore || cursor === null) return;
+    const timer = window.setInterval(() => {
+      invoke<SessionMessagesPage>("read_session_messages_page", {
+        sessionPath,
+        cursor,
+        limit: PAGE_LIMIT,
+      })
+        .then((page) => {
+          if (page.messages.length === 0) {
+            setCursor(page.nextCursor);
+            setHasMore(page.hasMore);
+            return;
+          }
+          setCursor(page.nextCursor);
+          setHasMore(page.hasMore);
+          setMessages((prev) => [...prev, ...page.messages]);
+        })
+        .catch(() => {});
+    }, LIVE_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [cursor, hasMore, loading, sessionPath]);
 
   return (
     <div
@@ -259,6 +82,39 @@ export function SessionView({ sessionPath }: { sessionPath: string }) {
         padding: "20px 28px 32px",
       }}
     >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 12,
+          gap: 10,
+        }}
+      >
+        <div style={{ fontSize: 12, color: "var(--text-hint)", fontFamily: "var(--font-mono)" }}>
+          {messages.length} messages
+        </div>
+        <button
+          type="button"
+          onClick={reload}
+          title={t("common.refresh")}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            padding: "5px 9px",
+            borderRadius: 6,
+            border: "1px solid var(--border-dim)",
+            background: "var(--bg-card)",
+            color: "var(--text-muted)",
+            cursor: "pointer",
+            fontSize: 12,
+          }}
+        >
+          <RotateCcw size={12} className={loading ? "spin" : undefined} />
+          {t("common.refresh")}
+        </button>
+      </div>
       {loading && (
         <div style={{ color: "var(--text-hint)", fontSize: 13, padding: "12px 0" }}>
           {t("session.loading")}
@@ -274,9 +130,28 @@ export function SessionView({ sessionPath }: { sessionPath: string }) {
           {t("session.noMessages")}
         </div>
       )}
-      {messages.map((msg, i) => (
-        <MessageBlock key={i} message={msg} />
+      {messages.map((msg) => (
+        <MessageBlock key={msg.id} message={msg} />
       ))}
+      {hasMore && !loading && (
+        <button
+          type="button"
+          disabled={loadingMore}
+          onClick={loadMore}
+          style={{
+            width: "100%",
+            padding: "8px 12px",
+            borderRadius: 7,
+            border: "1px solid var(--border-dim)",
+            background: "var(--bg-card)",
+            color: "var(--text-muted)",
+            cursor: loadingMore ? "not-allowed" : "pointer",
+            fontSize: 12,
+          }}
+        >
+          {loadingMore ? t("common.loading") : t("session.loadMore")}
+        </button>
+      )}
     </div>
   );
 }

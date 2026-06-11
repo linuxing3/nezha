@@ -54,6 +54,7 @@ export function FileExplorer({
     parentPath: string;
     kind: CreateKind;
   } | null>(null);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [creatingValue, setCreatingValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const commitInFlightRef = useRef(false);
@@ -361,11 +362,62 @@ export function FileExplorer({
   }, [creating, creatingPlacement]);
 
   useEffect(() => {
-    if (creating && inputRef.current) {
+    if ((creating || renamingPath) && inputRef.current) {
       inputRef.current.focus();
       inputRef.current.select();
     }
-  }, [creating]);
+  }, [creating, renamingPath]);
+
+  const startRename = useCallback(() => {
+    if (!ctxMenu || ctxMenu.isRoot) return;
+    const node = findNode(nodesRef.current, ctxMenu.path);
+    setCtxMenu(null);
+    setRenamingPath(ctxMenu.path);
+    setCreatingValue(node?.name ?? ctxMenu.path.split(/[\\/]/).pop() ?? "");
+  }, [ctxMenu]);
+
+  const commitRename = useCallback(async () => {
+    if (!renamingPath) return;
+    if (commitInFlightRef.current) return;
+    const newName = creatingValue.trim();
+    const node = findNode(nodesRef.current, renamingPath);
+    if (!newName || newName === node?.name) {
+      setRenamingPath(null);
+      setCreatingValue("");
+      return;
+    }
+    if (newName.includes("/") || newName.includes("\\")) {
+      showToast(t("file.renameFailed", { error: "Invalid file name" }));
+      return;
+    }
+    commitInFlightRef.current = true;
+    try {
+      const newPath = await safeInvoke<string>("rename_path", {
+        path: renamingPath,
+        newName,
+        projectPath,
+      });
+      if (isCancelled() || newPath === null) return;
+      setRenamingPath(null);
+      setCreatingValue("");
+      setSelectedPath((prev) => (prev === renamingPath ? newPath : prev));
+      await refresh();
+      if (!node?.is_dir) {
+        onFileSelect(newPath, newName);
+      }
+    } catch (error) {
+      if (!isCancelled()) {
+        showToast(t("file.renameFailed", { error: String(error) }));
+      }
+    } finally {
+      commitInFlightRef.current = false;
+    }
+  }, [creatingValue, isCancelled, onFileSelect, projectPath, refresh, renamingPath, safeInvoke, showToast, t]);
+
+  const cancelRename = useCallback(() => {
+    setRenamingPath(null);
+    setCreatingValue("");
+  }, []);
 
   const handleDelete = useCallback(async () => {
     if (!ctxMenu || ctxMenu.isRoot) return;
@@ -417,6 +469,7 @@ export function FileExplorer({
           onNewFile={() => startCreate("file")}
           onNewFolder={() => startCreate("folder")}
           onDelete={() => void handleDelete()}
+          onRename={startRename}
           onOpenInSystem={(event, path) => void openInSystemFolder(event, path)}
           onCopyPath={(event, path, withAt) => void copyPath(event, path, withAt)}
         />
@@ -468,17 +521,32 @@ export function FileExplorer({
             {flat.slice(startIdx, endIdx + 1).map((row, i) => {
               if (row.kind === "input") return null;
               const top = (startIdx + i) * ROW_HEIGHT + 2;
+              const isRenaming = renamingPath === row.node.path;
               return (
                 <div key={row.node.path} style={{ ...s.fileExplorerVirtualRow, top }}>
-                  <TreeItem
-                    node={row.node}
-                    depth={row.depth}
-                    selectedPath={selectedPath}
-                    contextPath={ctxMenu?.path ?? null}
-                    onSelect={handleSelect}
-                    onToggle={handleToggle}
-                    onContextMenu={handleContextMenu}
-                  />
+                  {isRenaming ? (
+                    <CreateInputRow
+                      depth={row.depth}
+                      kind={row.node.is_dir ? "folder" : "file"}
+                      value={creatingValue}
+                      onChange={setCreatingValue}
+                      onCommit={() => {
+                        void commitRename();
+                      }}
+                      onCancel={cancelRename}
+                      inputRef={inputRef}
+                    />
+                  ) : (
+                    <TreeItem
+                      node={row.node}
+                      depth={row.depth}
+                      selectedPath={selectedPath}
+                      contextPath={ctxMenu?.path ?? null}
+                      onSelect={handleSelect}
+                      onToggle={handleToggle}
+                      onContextMenu={handleContextMenu}
+                    />
+                  )}
                 </div>
               );
             })}

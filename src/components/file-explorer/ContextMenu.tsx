@@ -8,6 +8,7 @@ export function FileExplorerContextMenu({
   onNewFile,
   onNewFolder,
   onDelete,
+  onRename,
   onOpenInSystem,
   onCopyPath,
 }: {
@@ -16,6 +17,7 @@ export function FileExplorerContextMenu({
   onNewFile: () => void;
   onNewFolder: () => void;
   onDelete: () => void;
+  onRename: () => void;
   onOpenInSystem: (e: React.MouseEvent, path: string) => void;
   onCopyPath: (e: React.MouseEvent, path: string, withAt: boolean) => void;
 }) {
@@ -32,6 +34,7 @@ export function FileExplorerContextMenu({
       ? []
       : ([
           { action: "separator" },
+          { label: t("file.rename"), action: "rename" },
           { label: t("file.delete"), action: "delete", destructive: true },
         ] as const)),
   ] as const;
@@ -91,6 +94,12 @@ export function FileExplorerContextMenu({
                   event.preventDefault();
                   event.stopPropagation();
                   onNewFolder();
+                  return;
+                }
+                if (item.action === "rename") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onRename();
                   return;
                 }
                 if (item.action === "delete") {
