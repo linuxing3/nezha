@@ -67,6 +67,12 @@ jobs:
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             bundle_args: --bundles deb,rpm
+          - name: Linux ARM64
+            artifact_name: linux-aarch64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            bundle_args: --bundles deb,rpm
+            standalone_binary: nezha-linux-aarch64
 
     steps:
       - name: Checkout repository
@@ -112,6 +118,11 @@ jobs:
       - name: Build ${{ matrix.name }}
         run: pnpm tauri build --target ${{ matrix.target }} ${{ matrix.bundle_args }}
 
+      - name: Copy standalone executable
+        if: matrix.standalone_binary
+        shell: bash
+        run: cp "src-tauri/target/${{ matrix.target }}/release/nezha" "${{ matrix.standalone_binary }}"
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -123,6 +134,7 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
             src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
             src-tauri/target/${{ matrix.target }}/release/bundle/rpm/*.rpm
+            ${{ matrix.standalone_binary }}
 
   release:
     name: Create GitHub Release
